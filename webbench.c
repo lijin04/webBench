@@ -268,7 +268,7 @@ void build_request(const char *url)
         i = strstr(url, "://") - url + 3;
         if (proxyport == 0) proxyport = 80;
     } else if (strncasecmp("https://", url, 8) == 0) {
-        i = strstr(url, "://") - url + 4;
+        i = strstr(url, "://") - url + 3;
         if (proxyport == 0) proxyport = 443;
     }else {
         fprintf(stderr, "\nOnly HTTP/HTTPS protocol is directly supported, set --proxy for others.\n");
