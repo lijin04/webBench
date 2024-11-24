@@ -25,13 +25,22 @@
 #include <time.h>
 #include <signal.h>
 
+#include <openssl/ssl.h>
+#include <openssl/err.h>
+#include <openssl/crypto.h>
+
+
 /* values */
-volatile int timerexpired=0;
-int speed=0;
-int failed=0;
-int bytes=0;
+volatile int timerexpired = 0; // 定时器是否超时
+int speed = 0;                // 成功处理的请求数量
+int failed = 0;               // 失败的请求数量
+int bytes = 0;                // 接收的数据字节数
+
 
 /* globals */
+SSL_CTX *ssl_ctx;
+SSL *ssl;
+
 int http10=1; /* 0 - http/0.9, 1 - http/1.0, 2 - http/1.1 */
 /* Allow: GET, HEAD, OPTIONS, TRACE */
 #define METHOD_GET 0
@@ -108,6 +117,7 @@ int main(int argc, char *argv[])
     int opt=0;
     int options_index=0;
     char *tmp=NULL;
+    openssl_init();
 
     if(argc==1)
     {
@@ -251,14 +261,20 @@ void build_request(const char *url)
         fprintf(stderr,"URL is too long.\n");
         exit(2);
     }
-    if (0!=strncasecmp("http://",url,7)) 
-    { 
-        fprintf(stderr,"\nOnly HTTP protocol is directly supported, set --proxy for others.\n");
-        exit(2);
-    }
     
     /* protocol/host delimiter */
-    i=strstr(url,"://")-url+3;
+    // i=strstr(url,"://")-url+3;
+    if (strncasecmp("http://", url, 7) == 0) {
+        i = strstr(url, "://") - url + 3;
+        if (proxyport == 0) proxyport = 80;
+    } else if (strncasecmp("https://", url, 8) == 0) {
+        i = strstr(url, "://") - url + 4;
+        if (proxyport == 0) proxyport = 443;
+    }else {
+        fprintf(stderr, "\nOnly HTTP/HTTPS protocol is directly supported, set --proxy for others.\n");
+        exit(2);
+    }
+
 
     if(strchr(url+i,'/')==NULL) {
         fprintf(stderr,"\nInvalid URL syntax - hostname don't ends with '/'.\n");
@@ -268,15 +284,15 @@ void build_request(const char *url)
     if(proxyhost==NULL)
     {
         /* get port from hostname */
-        if(index(url+i,':')!=NULL && index(url+i,':')<index(url+i,'/'))
+        if(strchr(url + i, ':') && strchr(url + i, ':') < strchr(url + i, '/'))
         {
-            strncpy(host,url+i,strchr(url+i,':')-url-i);
-            //bzero(tmp,10);
-            memset(tmp,0,10);
-            strncpy(tmp,index(url+i,':')+1,strchr(url+i,'/')-index(url+i,':')-1);
-            /* printf("tmp=%s\n",tmp); */
-            proxyport=atoi(tmp);
-            if(proxyport==0) proxyport=80;
+            // 提取主机名
+            strncpy(host, url + i, strchr(url + i, ':') - (url + i));
+            // 提取端口号
+            memset(tmp, 0, sizeof(tmp));
+            strncpy(tmp, strchr(url + i, ':') + 1, strchr(url + i, '/') - strchr(url + i, ':') - 1);
+            proxyport = atoi(tmp); // 转换端口号
+            if (proxyport == 0) proxyport = 80; // 如果端口号无效，默认为 80
         } 
         else
         {
@@ -465,30 +481,94 @@ void benchcore(const char *host,const int port,const char *req)
         
         s=Socket(host,port);                          
         if(s<0) { failed++;continue;} 
-        if(rlen!=write(s,req,rlen)) {failed++;close(s);continue;}
-        if(http10==0) 
-        if(shutdown(s,1)) { failed++;close(s);continue;}
-        if(force==0) 
-        {
-            /* read all available data from socket */
-            while(1)
-            {
-                if(timerexpired) break; 
-                i=read(s,buf,1500);
-                /* fprintf(stderr,"%d\n",i); */
-                if(i<0) 
-                { 
-                    failed++;
-                    close(s);
-                    goto nexttry;
+
+        if(port == 443) {           //HTTPS
+
+            SSL_CTX *ssl_ctx = initialize_ssl();
+            ssl = SSL_new(ssl_ctx);
+            SSL_set_fd(ssl, s);
+
+            if (SSL_connect(ssl) <= 0) {
+                failed++;
+                SSL_free(ssl);
+                close(s);
+                continue;
+            }
+
+            if(SSL_write(ssl, req, rlen) <= 0) {
+                failed++;
+                SSL_free(ssl);
+                close(s);
+                continue;
+            }
+            if(force == 0) {
+                while(1) {
+                    if(timerexpired) break;
+                    i=SSL_read(ssl, buf, 1500);
+                    if(i<0) {
+                        failed++;
+                        SSL_free(ssl);
+                        close(s);
+                        goto nexttry;
+                    }else if(i == 0) {
+                        break;
+                    }else {
+                        bytes+=i;
+                    }
                 }
-                else
-                if(i==0) break;
-                else
-                bytes+=i;
+            }
+            SSL_free(ssl);
+            cleanup_ssl(ssl_ctx);
+        }
+        else {
+            if(rlen!=write(s,req,rlen)) {failed++;close(s);continue;}
+            if(http10==0) 
+            if(shutdown(s,1)) { failed++;close(s);continue;}
+            if(force==0) 
+            {
+                /* read all available data from socket */
+                while(1)
+                {
+                    if(timerexpired) break; 
+                    i=read(s,buf,1500);
+                    /* fprintf(stderr,"%d\n",i); */
+                    if(i<0) 
+                    { 
+                        failed++;
+                        close(s);
+                        goto nexttry;
+                    }
+                    else
+                    if(i==0) break;
+                    else
+                    bytes+=i;
+                }
             }
         }
+        
         if(close(s)) {failed++;continue;}
         speed++;
+        openssl_cleanup();
+
     }
+}
+
+void openssl_init() {
+    SSL_library_init();
+    SSL_load_error_strings();
+    OpenSSL_add_all_algorithms();
+    ssl_ctx = SSL_CTX_new(TLS_client_method());
+    if(!ssl_ctx) {
+        fprintf(stderr, "Failed to initialize SSL context\n");
+        exit(EXIT_FAILURE);
+    }
+}
+
+void openssl_cleanup() {
+    if (ssl_ctx) {
+        SSL_CTX_free(ssl_ctx);
+        ssl_ctx = NULL;
+    }
+    ERR_free_strings();
+    EVP_cleanup();
 }

@@ -1,6 +1,6 @@
 CFLAGS?=	-Wall -ggdb -W -O
 CC?=		gcc
-LIBS?=
+LIBS?=      -lssl -lcrypto
 LDFLAGS?=
 PREFIX?=	/usr/local/webbench
 VERSION=1.5

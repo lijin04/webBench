@@ -26,6 +26,34 @@
 #include <stdlib.h>
 #include <stdarg.h>
 
+#include <openssl/ssl.h>
+#include <openssl/err.h>
+#include <openssl/crypto.h>
+
+
+SSL_CTX *ssl_ctx;
+SSL *ssl;
+
+
+SSL_CTX *initialize_ssl() {
+    SSL_library_init();
+    SSL_load_error_strings();
+    OpenSSL_add_all_algorithms();
+    SSL_CTX *ssl_ctx = SSL_CTX_new(TLS_client_method());
+    if (!ssl_ctx) {
+        fprintf(stderr, "Error initializing SSL context\n");
+        ERR_print_errors_fp(stderr);
+        exit(EXIT_FAILURE);
+    }
+    return ssl_ctx;
+}
+
+void cleanup_ssl(SSL_CTX *ctx) {
+    SSL_CTX_free(ctx);
+    EVP_cleanup();
+    ERR_free_strings();
+}
+
 int Socket(const char *host, int clientPort)
 {
     int sock;
@@ -34,9 +62,9 @@ int Socket(const char *host, int clientPort)
     struct hostent *hp;
     
     memset(&ad, 0, sizeof(ad));
-    ad.sin_family = AF_INET;
+    ad.sin_family = AF_INET;//设置为ipv4
 
-    inaddr = inet_addr(host);
+    inaddr = inet_addr(host);//将host转换为ipv4
     if (inaddr != INADDR_NONE)
         memcpy(&ad.sin_addr, &inaddr, sizeof(inaddr));
     else
@@ -53,6 +81,20 @@ int Socket(const char *host, int clientPort)
         return sock;
     if (connect(sock, (struct sockaddr *)&ad, sizeof(ad)) < 0)
         return -1;
+
+    if (clientPort == 443) {  //HTTPS connection
+        SSL_CTX *ssl_ctx = initialize_ssl();
+        ssl = SSL_new(ssl_ctx);
+        SSL_set_fd(ssl, sock);
+        if (SSL_connect(ssl) <= 0) {
+            fprintf(stderr, "SSL handshake failed\n");
+            SSL_free(ssl);
+            close(sock);
+            return -1;
+        }
+        return (int)(long)ssl;
+    }
     return sock;
 }
+
 
